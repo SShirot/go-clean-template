@@ -24,6 +24,7 @@ import (
 // @BasePath    /v1
 func NewRouter(app *fiber.App, cfg *config.Config, t usecase.Translation, l logger.Interface) {
 	// Options
+	app.Use(middleware.CORS())
 	app.Use(middleware.Logger(l))
 	app.Use(middleware.Recovery(l))
 
