@@ -13,8 +13,10 @@ type Container struct {
 	Config *config.Config
 
 	// Infrastructure
-	Logger   LoggerInterface
-	Postgres PostgresInterface
+	Logger     LoggerInterface
+	Postgres   PostgresInterface
+	HTTPServer HTTPServerInterface
+	GRPCServer GRPCServerInterface
 
 	// Repositories
 	TranslationRepo TranslationRepoInterface
@@ -38,6 +40,18 @@ type LoggerInterface interface {
 
 type PostgresInterface interface {
 	Close()
+}
+
+type HTTPServerInterface interface {
+	Start()
+	Stop() error
+	GetApp() interface{}
+}
+
+type GRPCServerInterface interface {
+	Start()
+	Stop() error
+	GetServer() interface{}
 }
 
 type TranslationRepoInterface interface {

@@ -95,7 +95,7 @@ mock: ### run mockgen
 .PHONY: mock
 
 wire: ### generate wire dependency injection code
-	cd internal/wire && wire
+	cd internal/di/wire && wire
 .PHONY: wire
 
 migrate-create:  ### create new migration

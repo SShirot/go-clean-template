@@ -2,16 +2,85 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/evrone/go-clean-template/config"
-	"github.com/evrone/go-clean-template/internal/controller/grpc"
+	grpcController "github.com/evrone/go-clean-template/internal/controller/grpc"
 	"github.com/evrone/go-clean-template/internal/controller/http"
-	"github.com/evrone/go-clean-template/internal/wire"
+	"github.com/evrone/go-clean-template/internal/di"
+	"github.com/evrone/go-clean-template/internal/di/wire"
+	domainTranslation "github.com/evrone/go-clean-template/internal/domain/translation"
+	"github.com/evrone/go-clean-template/internal/entity"
+	"github.com/evrone/go-clean-template/internal/usecase"
+	"github.com/evrone/go-clean-template/pkg/logger"
+	"github.com/gofiber/fiber/v2"
+	"google.golang.org/grpc"
 )
+
+// translationAdapter adapts di.TranslationServiceInterface to usecase.Translation
+type translationAdapter struct {
+	svc di.TranslationServiceInterface
+}
+
+func (a translationAdapter) Translate(ctx context.Context, t entity.Translation) (entity.Translation, error) {
+	// Adapt to application service request type
+	req := &domainTranslation.TranslateRequest{
+		Source:      t.Source,
+		Destination: t.Destination,
+		Original:    t.Original,
+	}
+
+	res, err := a.svc.Translate(ctx, req)
+	if err != nil {
+		return entity.Translation{}, err
+	}
+	// Handle different possible response shapes
+	if r, ok := res.(*domainTranslation.TranslateResponse); ok {
+		return entity.Translation{
+			Source:      t.Source,
+			Destination: t.Destination,
+			Original:    t.Original,
+			Translation: r.Translation,
+		}, nil
+	}
+	if tr, ok := res.(entity.Translation); ok {
+		return tr, nil
+	}
+	return entity.Translation{}, fmt.Errorf("invalid translation response type")
+}
+
+func (a translationAdapter) History(ctx context.Context) (entity.TranslationHistory, error) {
+	res, err := a.svc.GetHistory(ctx, 100, 0)
+	if err != nil {
+		return entity.TranslationHistory{}, err
+	}
+	// Handle application-layer type
+	if h, ok := res.(*domainTranslation.TranslationHistory); ok {
+		items := make([]entity.Translation, 0, len(h.History))
+		for _, d := range h.History {
+			items = append(items, entity.Translation{
+				Source:      d.Source,
+				Destination: d.Destination,
+				Original:    d.Original,
+				Translation: d.Translation,
+			})
+		}
+		return entity.TranslationHistory{History: items}, nil
+	}
+	// Already entity type
+	if h, ok := res.(entity.TranslationHistory); ok {
+		return h, nil
+	}
+	// Slice of entity translations
+	if list, ok := res.([]entity.Translation); ok {
+		return entity.TranslationHistory{History: list}, nil
+	}
+	return entity.TranslationHistory{}, fmt.Errorf("invalid history type")
+}
 
 // Run creates objects via constructors using Wire dependency injection.
 func Run(cfg *config.Config) {
@@ -22,17 +91,30 @@ func Run(cfg *config.Config) {
 	}
 
 	// Ensure postgres connection is closed on exit
-	defer app.Postgres.Close()
+	if app.Postgres != nil {
+		defer app.Postgres.Close()
+	}
 
 	// Setup routers
-	grpc.NewRouter(app.GRPCServer.App, app.TranslationUC, app.Logger)
-	http.NewRouter(app.HTTPServer.App, cfg, app.TranslationUC, app.Logger)
+	if app.GRPCServer != nil && app.HTTPServer != nil && app.Logger != nil && app.TranslationUC != nil {
+		grpcServer := app.GRPCServer.GetServer().(*grpc.Server)
+		httpApp := app.HTTPServer.GetApp().(*fiber.App)
+		logger := app.Logger.(logger.Interface)
+		translationUC := usecase.Translation(translationAdapter{svc: app.TranslationUC})
 
-	// Start servers
-	app.RabbitMQServer.Start()
-	app.NATSServer.Start()
-	app.GRPCServer.Start()
-	app.HTTPServer.Start()
+		grpcController.NewRouter(grpcServer, translationUC, logger)
+		http.NewRouter(httpApp, cfg, translationUC, logger)
+
+		// Start servers
+		app.GRPCServer.Start()
+		app.HTTPServer.Start()
+	}
+
+	// Log successful initialization
+	if app.Logger != nil {
+		app.Logger.Info("app - Run - application initialized successfully")
+		app.Logger.Info("app - Run - Swagger available at: http://localhost:8080/swagger/")
+	}
 
 	// Waiting signal
 	interrupt := make(chan os.Signal, 1)
@@ -41,34 +123,13 @@ func Run(cfg *config.Config) {
 	select {
 	case s := <-interrupt:
 		app.Logger.Info("app - Run - signal: %s", s.String())
-	case err = <-app.HTTPServer.Notify():
-		app.Logger.Error(fmt.Errorf("app - Run - httpServer.Notify: %w", err))
-	case err = <-app.GRPCServer.Notify():
-		app.Logger.Error(fmt.Errorf("app - Run - grpcServer.Notify: %w", err))
-	case err = <-app.RabbitMQServer.Notify():
-		app.Logger.Error(fmt.Errorf("app - Run - rmqServer.Notify: %w", err))
-	case err = <-app.NATSServer.Notify():
-		app.Logger.Error(fmt.Errorf("app - Run - natsServer.Notify: %w", err))
 	}
 
 	// Shutdown
-	err = app.HTTPServer.Shutdown()
-	if err != nil {
-		app.Logger.Error(fmt.Errorf("app - Run - httpServer.Shutdown: %w", err))
+	if app.HTTPServer != nil {
+		app.HTTPServer.Stop()
 	}
-
-	err = app.GRPCServer.Shutdown()
-	if err != nil {
-		app.Logger.Error(fmt.Errorf("app - Run - grpcServer.Shutdown: %w", err))
-	}
-
-	err = app.RabbitMQServer.Shutdown()
-	if err != nil {
-		app.Logger.Error(fmt.Errorf("app - Run - rmqServer.Shutdown: %w", err))
-	}
-
-	err = app.NATSServer.Shutdown()
-	if err != nil {
-		app.Logger.Error(fmt.Errorf("app - Run - natsServer.Shutdown: %w", err))
+	if app.GRPCServer != nil {
+		app.GRPCServer.Stop()
 	}
 }
