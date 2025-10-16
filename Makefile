@@ -94,6 +94,10 @@ mock: ### run mockgen
 	mockgen -source ./internal/usecase/contracts.go -package usecase_test > ./internal/usecase/mocks_usecase_test.go
 .PHONY: mock
 
+wire: ### generate wire dependency injection code
+	cd internal/wire && wire
+.PHONY: wire
+
 migrate-create:  ### create new migration
 	migrate create -ext sql -dir migrations '$(word 2,$(MAKECMDGOALS))'
 .PHONY: migrate-create
@@ -107,5 +111,5 @@ bin-deps: ### install tools
 	go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate
 .PHONY: bin-deps
 
-pre-commit: swag-v1 proto-v1 mock format linter-golangci test ### run pre-commit
+pre-commit: swag-v1 proto-v1 wire mock format linter-golangci test ### run pre-commit
 .PHONY: pre-commit

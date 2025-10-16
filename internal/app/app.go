@@ -8,67 +8,31 @@ import (
 	"syscall"
 
 	"github.com/evrone/go-clean-template/config"
-	amqprpc "github.com/evrone/go-clean-template/internal/controller/amqp_rpc"
 	"github.com/evrone/go-clean-template/internal/controller/grpc"
 	"github.com/evrone/go-clean-template/internal/controller/http"
-	natsrpc "github.com/evrone/go-clean-template/internal/controller/nats_rpc"
-	"github.com/evrone/go-clean-template/internal/repo/persistent"
-	"github.com/evrone/go-clean-template/internal/repo/webapi"
-	"github.com/evrone/go-clean-template/internal/usecase/translation"
-	"github.com/evrone/go-clean-template/pkg/grpcserver"
-	"github.com/evrone/go-clean-template/pkg/httpserver"
-	"github.com/evrone/go-clean-template/pkg/logger"
-	natsRPCServer "github.com/evrone/go-clean-template/pkg/nats/nats_rpc/server"
-	"github.com/evrone/go-clean-template/pkg/postgres"
-	rmqRPCServer "github.com/evrone/go-clean-template/pkg/rabbitmq/rmq_rpc/server"
+	"github.com/evrone/go-clean-template/internal/wire"
 )
 
-// Run creates objects via constructors.
-func Run(cfg *config.Config) { //nolint: gocyclo,cyclop,funlen,gocritic,nolintlint
-	l := logger.New(cfg.Log.Level)
-
-	// Repository
-	pg, err := postgres.New(cfg.PG.URL, postgres.MaxPoolSize(cfg.PG.PoolMax))
+// Run creates objects via constructors using Wire dependency injection.
+func Run(cfg *config.Config) {
+	// Initialize app with all dependencies using Wire
+	app, err := wire.InitializeApp(cfg)
 	if err != nil {
-		l.Fatal(fmt.Errorf("app - Run - postgres.New: %w", err))
-	}
-	defer pg.Close()
-
-	// Use-Case
-	translationUseCase := translation.New(
-		persistent.New(pg),
-		webapi.New(),
-	)
-
-	// RabbitMQ RPC Server
-	rmqRouter := amqprpc.NewRouter(translationUseCase, l)
-
-	rmqServer, err := rmqRPCServer.New(cfg.RMQ.URL, cfg.RMQ.ServerExchange, rmqRouter, l)
-	if err != nil {
-		l.Fatal(fmt.Errorf("app - Run - rmqServer - server.New: %w", err))
+		panic(fmt.Errorf("failed to initialize app: %w", err))
 	}
 
-	// NATS RPC Server
-	natsRouter := natsrpc.NewRouter(translationUseCase, l)
+	// Ensure postgres connection is closed on exit
+	defer app.Postgres.Close()
 
-	natsServer, err := natsRPCServer.New(cfg.NATS.URL, cfg.NATS.ServerExchange, natsRouter, l)
-	if err != nil {
-		l.Fatal(fmt.Errorf("app - Run - natsServer - server.New: %w", err))
-	}
-
-	// gRPC Server
-	grpcServer := grpcserver.New(l, grpcserver.Port(cfg.GRPC.Port))
-	grpc.NewRouter(grpcServer.App, translationUseCase, l)
-
-	// HTTP Server
-	httpServer := httpserver.New(l, httpserver.Port(cfg.HTTP.Port), httpserver.Prefork(cfg.HTTP.UsePreforkMode))
-	http.NewRouter(httpServer.App, cfg, translationUseCase, l)
+	// Setup routers
+	grpc.NewRouter(app.GRPCServer.App, app.TranslationUC, app.Logger)
+	http.NewRouter(app.HTTPServer.App, cfg, app.TranslationUC, app.Logger)
 
 	// Start servers
-	rmqServer.Start()
-	natsServer.Start()
-	grpcServer.Start()
-	httpServer.Start()
+	app.RabbitMQServer.Start()
+	app.NATSServer.Start()
+	app.GRPCServer.Start()
+	app.HTTPServer.Start()
 
 	// Waiting signal
 	interrupt := make(chan os.Signal, 1)
@@ -76,35 +40,35 @@ func Run(cfg *config.Config) { //nolint: gocyclo,cyclop,funlen,gocritic,nolintli
 
 	select {
 	case s := <-interrupt:
-		l.Info("app - Run - signal: %s", s.String())
-	case err = <-httpServer.Notify():
-		l.Error(fmt.Errorf("app - Run - httpServer.Notify: %w", err))
-	case err = <-grpcServer.Notify():
-		l.Error(fmt.Errorf("app - Run - grpcServer.Notify: %w", err))
-	case err = <-rmqServer.Notify():
-		l.Error(fmt.Errorf("app - Run - rmqServer.Notify: %w", err))
-	case err = <-natsServer.Notify():
-		l.Error(fmt.Errorf("app - Run - natsServer.Notify: %w", err))
+		app.Logger.Info("app - Run - signal: %s", s.String())
+	case err = <-app.HTTPServer.Notify():
+		app.Logger.Error(fmt.Errorf("app - Run - httpServer.Notify: %w", err))
+	case err = <-app.GRPCServer.Notify():
+		app.Logger.Error(fmt.Errorf("app - Run - grpcServer.Notify: %w", err))
+	case err = <-app.RabbitMQServer.Notify():
+		app.Logger.Error(fmt.Errorf("app - Run - rmqServer.Notify: %w", err))
+	case err = <-app.NATSServer.Notify():
+		app.Logger.Error(fmt.Errorf("app - Run - natsServer.Notify: %w", err))
 	}
 
 	// Shutdown
-	err = httpServer.Shutdown()
+	err = app.HTTPServer.Shutdown()
 	if err != nil {
-		l.Error(fmt.Errorf("app - Run - httpServer.Shutdown: %w", err))
+		app.Logger.Error(fmt.Errorf("app - Run - httpServer.Shutdown: %w", err))
 	}
 
-	err = grpcServer.Shutdown()
+	err = app.GRPCServer.Shutdown()
 	if err != nil {
-		l.Error(fmt.Errorf("app - Run - grpcServer.Shutdown: %w", err))
+		app.Logger.Error(fmt.Errorf("app - Run - grpcServer.Shutdown: %w", err))
 	}
 
-	err = rmqServer.Shutdown()
+	err = app.RabbitMQServer.Shutdown()
 	if err != nil {
-		l.Error(fmt.Errorf("app - Run - rmqServer.Shutdown: %w", err))
+		app.Logger.Error(fmt.Errorf("app - Run - rmqServer.Shutdown: %w", err))
 	}
 
-	err = natsServer.Shutdown()
+	err = app.NATSServer.Shutdown()
 	if err != nil {
-		l.Error(fmt.Errorf("app - Run - natsServer.Shutdown: %w", err))
+		app.Logger.Error(fmt.Errorf("app - Run - natsServer.Shutdown: %w", err))
 	}
 }
