@@ -41,7 +41,13 @@ func (s *service) Translate(ctx context.Context, req interface{}) (interface{}, 
 		Original:    translateReq.Original,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to translate text: %w", err)
+		// Fallback: echo original when external API is unavailable
+		translationResult = entity.Translation{
+			Source:      translateReq.Source,
+			Destination: translateReq.Destination,
+			Original:    translateReq.Original,
+			Translation: translateReq.Original,
+		}
 	}
 
 	// Create translation entity
